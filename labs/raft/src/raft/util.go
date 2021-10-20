@@ -31,7 +31,7 @@ const (
 	 * the interval that a server send out heartbeart package.
 	 * heartBeatInterval << electionTimeout
 	 */
-	heartBeatInterval = time.Millisecond * 30
+	heartBeatInterval = time.Millisecond * 50
 )
 
 // Debugging

@@ -147,8 +147,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // 当前任期，用于Leader去自己更新
-	Success bool // Follower是否含有吻合prevLogIndex和prevLogTerm的log entry
+	Term          int  // 当前任期，用于Leader去自己更新
+	Success       bool // Follower是否含有吻合prevLogIndex和prevLogTerm的log entry
+	ConflictTerm  int  // 如果添加失败，返回与冲突日志的Term
+	ConflictIndex int  // 如果添加失败，返回与冲突日志的Term相同的最早的日志Index
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -186,6 +188,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//    whose term matches prevLogTerm
 		DPrintf("%d [term: %d] Refuse AppendEntries from %d, term is %d due to Law 2.",
 			rf.me, rf.currentTerm, args.LeaderId, args.Term)
+
+		// Improvement for log inconsistent compression.
+		// Ref to the bottom of page 7 and the header of page 8 in the RAFT paper.
+		// The follower can include the term of the conflicting entry and the first index it stores for that term.
+		// With this information, the leader can decrement nextIndex to bypass all the conflicting entries in that term.
+
+		// args.PrevLogIndex is > 0.
+		if len(rf.log) <= args.PrevLogIndex {
+			reply.ConflictTerm = args.PrevLogTerm
+			reply.ConflictIndex = len(rf.log)
+		} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+			conflictIndex := args.PrevLogIndex
+			// find the oldest entry that have the same term with the conflict one.
+			for conflictIndex > 1 && rf.log[conflictIndex].Term == rf.log[conflictIndex-1].Term {
+				conflictIndex--
+			}
+			reply.ConflictIndex = conflictIndex
+		}
+
 		// reset timeout
 		rf.rstTimer()
 	} else {
@@ -249,9 +271,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	return
 }
 
-func (rf *Raft) handleAppendEntriesReply(success bool, recvTerm int, server int, currentIdx int) {
+func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply, server int, currentIdx int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	recvTerm, success := reply.Term, reply.Success
 
 	// check current state
 	if rf.currentState != StateLeader {
@@ -286,8 +310,18 @@ func (rf *Raft) handleAppendEntriesReply(success bool, recvTerm int, server int,
 		// apply entries fail,
 		// If AppendEntries fails because of log inconsistency,
 		// decrement nextIndex and retry
-		DPrintf("%d [term: %d] ApplyEntries for entry %d fail because of log inconsistency, decrement the nextIndex.", rf.me, rf.currentTerm, currentIdx)
-		rf.nextIndex[server]--
+
+		// improvement for log inconsistent compression.
+		// reset the nextIndex
+		conflictIndex, _ := reply.ConflictIndex, reply.ConflictTerm
+		if conflictIndex == 1 {
+			rf.nextIndex[server] = 1
+		} else {
+			rf.nextIndex[server] = conflictIndex - 1
+		}
+
+		DPrintf("%d [term: %d] ApplyEntries for entry %d fail because of log inconsistency, decrement the nextIndex to %d.", rf.me, rf.currentTerm, currentIdx, rf.nextIndex[server])
+		// rf.nextIndex[server]--
 	}
 }
 
@@ -511,7 +545,7 @@ func (rf *Raft) sendHeartBeats() {
 					if ok {
 						DPrintf("%d [term: %d] Receive AppendEntriesReply from %d, success is %v, term is %d",
 							rf.me, rf.currentTerm, server, reply.Success, reply.Term)
-						rf.handleAppendEntriesReply(reply.Success, reply.Term, server, currentIdx)
+						rf.handleAppendEntriesReply(reply, server, currentIdx)
 					} else {
 						DPrintf("%d [term: %d] Send AppendEntries failed, target is %d, try again.", rf.me, rf.currentTerm, server)
 						//goto retry
@@ -706,7 +740,7 @@ func (rf *Raft) checkCommitIndex(server int) {
 	// 1. N > commitIndex
 	// 2. exceed half number
 	// 3. and log[N].term == currentTerm
-	DPrintf("commitIndex:%d currentIdx:%d", rf.commitIndex, currentIdx)
+	// DPrintf("commitIndex:%d currentIdx:%d", rf.commitIndex, currentIdx)
 	if rf.commitIndex < currentIdx && (commitCount >= len(rf.peers)/2+1) &&
 		(rf.log[currentIdx].Term == rf.currentTerm) {
 		DPrintf("%d [term: %d] log entry %d is committed to above half number of server, apply it.",
