@@ -817,6 +817,8 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 	}
 
+	time.Sleep(RaftElectionTimeout * 10)
+
 	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()
@@ -938,7 +940,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		values = append(values, vv...)
 	}
 
-	time.Sleep(RaftElectionTimeout)
+	time.Sleep(RaftElectionTimeout * 10)
 
 	lastIndex := cfg.one(rand.Int(), servers, true)
 
